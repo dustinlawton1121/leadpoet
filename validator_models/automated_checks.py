@@ -9,6 +9,7 @@ import uuid
 import whois
 import json
 import numpy as np
+import unicodedata
 # from pygod.detector import DOMINANT  # DEPRECATED: Only used in unused collusion_check function
 from datetime import datetime
 from urllib.parse import urlparse
@@ -30,13 +31,24 @@ from Leadpoet.utils.utils_lead_extraction import (
 
 MAX_REP_SCORE = 48  # Wayback (6) + SEC (12) + WHOIS/DNSBL (10) + GDELT (10) + Companies House (10) = 48
 
+def normalize_accents(text: str) -> str:
+    """
+    Remove accents/diacritics from text for name matching.
+    e.g., "José" -> "Jose", "François" -> "Francois"
+    """
+    # Normalize to NFD form (decomposes accented chars into base + combining mark)
+    # Then remove combining marks (category 'Mn')
+    normalized = unicodedata.normalize('NFD', text)
+    return ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
+
+
 # Custom exception for API infrastructure failures (should skip lead, not submit)
 class EmailVerificationUnavailableError(Exception):
     """Raised when email verification API is unavailable (no credits, bad key, network error, etc.)"""
     pass
 
 load_dotenv()
-MYEMAILVERIFIER_API_KEY = os.getenv("MYEMAILVERIFIER_API_KEY", "")
+MYEMAILVERIFIER_API_KEY = ''
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
 # NEW: Stage 4 API keys (Google Search Engine + OpenAI LLM)
@@ -189,10 +201,10 @@ async def store_validation_artifact(lead_data: dict, validation_result: dict, st
         }
 
         filename = f"validation_{stage}_{timestamp}_{uuid.uuid4().hex[:8]}.json"
-        # filepath = os.path.join(VALIDATION_ARTIFACTS_DIR, filename)
+        filepath = os.path.join(VALIDATION_ARTIFACTS_DIR, filename)
 
-        # with open(filepath, "w") as f:
-        #     json.dump(artifact_data, f, indent=2, default=str)
+        with open(filepath, "w") as f:
+            json.dump(artifact_data, f, indent=2, default=str)
 
         print(f"✅ Validation artifact stored: {filename}")
     except Exception as e:
@@ -237,9 +249,9 @@ async def log_validation_metrics(lead_data: dict, validation_result: dict, stage
             "reason": validation_result.get("reason", "Unknown"),
         }
 
-        # log_file = os.path.join(VALIDATION_ARTIFACTS_DIR, "validation_log.jsonl")
-        # with open(log_file, "a") as f:
-        #     f.write(json.dumps(log_entry) + "\n")
+        log_file = os.path.join(VALIDATION_ARTIFACTS_DIR, "validation_log.jsonl")
+        with open(log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
 
     except Exception as e:
         print(f"⚠️ Failed to log validation metrics: {e}")
@@ -1741,14 +1753,22 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
                 name_parts = full_name.lower().split()
                 first_name = name_parts[0] if name_parts else ""
                 last_name = name_parts[-1] if len(name_parts) > 1 else ""
+
+                # Normalize accents for matching (José -> Jose, François -> Francois)
+                first_name_normalized = normalize_accents(first_name)
+                last_name_normalized = normalize_accents(last_name)
                 
                 target_person_results = []
                 other_person_results = []
                 
                 for item in profile_headlines:
                     title_lower = item.get("title", "").lower()
-                    # Check if target person's name is in the title
-                    if first_name in title_lower and last_name in title_lower:
+                    # Normalize the title too for accent-insensitive matching
+                    title_normalized = normalize_accents(title_lower)
+                    
+                    # Check if target person's name is in the title (accent-insensitive)
+                    # This handles cases like "Jose Varatojo" matching "José Diogo Varatojo"
+                    if first_name_normalized in title_normalized and last_name_normalized in title_normalized:
                         target_person_results.append(item)
                     else:
                         other_person_results.append(item)
@@ -3926,11 +3946,16 @@ def fuzzy_pre_verification_stage5(
     ddg_region_results: List[Dict],
     ddg_industry_results: List[Dict],
     full_name: str = "",
-    company: str = ""
+    company: str = "",
+    role_only: bool = False
 ) -> Dict:
     """
     Pre-verify ROLE and REGION using fuzzy matching BEFORE sending to LLM.
     INDUSTRY is ALWAYS sent to LLM.
+
+    Args:
+        role_only: If True, only check role and suppress region/industry messages.
+                   Used for early exit check before region/industry DDG searches.
     """
     result = {
         "role_verified": False,
@@ -4128,6 +4153,7 @@ def fuzzy_pre_verification_stage5(
         print(f"   ⚠️ FUZZY ROLE: No DDG results or no claimed role")
     
     # REGION ANTI-GAMING CHECK
+    # REGION ANTI-GAMING CHECK (runs even in role_only mode for early exit)
     if claimed_region:
         US_STATES_SET = {
             'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
@@ -4158,6 +4184,11 @@ def fuzzy_pre_verification_stage5(
             print(f"      Claimed region contains {len(states_found)} different US states - HARD FAIL")
             print(f"      This lead will FAIL regardless of LLM verification")
             ddg_region_results = None
+
+    # If role_only mode, skip region DDG-based matching and industry checks
+    # (Anti-gaming check above still runs for early exit detection)
+    if role_only:
+        return result
     
     # REGION FUZZY MATCHING
     if ddg_region_results and claimed_region:
@@ -4519,8 +4550,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         }
     
     # Wait before DDG searches
-    print(f"   ⏳ Waiting 5s before Stage 5 DDG searches...")
-    await asyncio.sleep(5)
+    print(f"   ⏳ Waiting 3s before Stage 5 DDG searches...")
+    await asyncio.sleep(3)
     
     # STEP 1: DDG SEARCH FOR ROLE
     print(f"   🔍 DDG: Searching for {full_name}'s role at {company}...")
@@ -4532,8 +4563,52 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     
     print(f"   ⏳ Waiting 5s before region search...")
     await asyncio.sleep(5)
+    # EARLY EXIT CHECK: Do quick role + region anti-gaming check BEFORE region/industry DDG searches
+    # This saves 6+ seconds and 2 DDG API calls when role is definitively wrong OR region is gaming
+    print(f"   🔍 QUICK CHECK: Verifying role and region anti-gaming before continuing...")
+    quick_result = fuzzy_pre_verification_stage5(
+        claimed_role=claimed_role,
+        claimed_region=claimed_region,  # Pass real region for anti-gaming check
+        claimed_industry="",  # Skip industry check
+        ddg_role_results=role_results,
+        ddg_region_results=[],  # Empty - just checking anti-gaming on claimed_region string
+        ddg_industry_results=[],  # Empty - not checking yet
+        full_name=full_name,
+        company=company,
+        role_only=True  # Skip DDG-based region/industry matching, but anti-gaming still runs
+    )
+    
+    # EARLY EXIT: Role definitively failed - skip region/industry DDG searches entirely
+    if quick_result.get("role_definitive_fail"):
+        print(f"   ❌ EARLY EXIT: Role check failed - SKIPPING region and industry DDG searches")
+        return False, {
+            "stage": "Stage 5: Role/Region/Industry",
+            "check_name": "check_stage5_unified",
+            "message": f"Role FAILED: Found '{quick_result.get('role_extracted')}' but miner claimed '{claimed_role}'",
+            "failed_fields": ["role"],
+            "early_exit": "role_failed_before_region_industry",
+            "extracted_role": quick_result.get("role_extracted"),
+            "claimed_role": claimed_role,
+            "ddg_searches_skipped": ["region", "industry"]
+        }
+    
+    # EARLY EXIT: Region anti-gaming (multiple states) - skip region/industry DDG searches
+    if quick_result.get("region_hard_fail"):
+        print(f"   ❌ EARLY EXIT: Region anti-gaming - SKIPPING region and industry DDG searches")
+        return False, {
+            "stage": "Stage 5: Role/Region/Industry",
+            "check_name": "check_stage5_unified",
+            "message": f"Region FAILED (anti-gaming): {quick_result.get('region_reason')}",
+            "failed_fields": ["region"],
+            "early_exit": "region_anti_gaming_before_ddg",
+            "ddg_searches_skipped": ["region", "industry"]
+        }
+    
+    print(f"   ⏳ Waiting 3s before region search...")
+    await asyncio.sleep(3)
     
     # STEP 2: DDG SEARCH FOR REGION
+    # STEP 2: DDG SEARCH FOR REGION (only if role didn't definitively fail)
     print(f"   🔍 DDG: Searching for {company} headquarters location...")
     region_results = await _ddg_search_stage5("region", company=company, region_hint=claimed_region)
     if region_results:
@@ -4541,8 +4616,11 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
     else:
         print(f"   ⚠️ No region results found")
     
-    print(f"   ⏳ Waiting 5s before industry search...")
-    await asyncio.sleep(5)
+     # Note: Region anti-gaming check already done in quick_result above (before region DDG)
+    # No need to check again here
+    
+    print(f"   ⏳ Waiting 3s before industry search...")
+    await asyncio.sleep(3)
     
     # STEP 3: DDG SEARCH FOR INDUSTRY
     print(f"   🔍 DDG: Searching for {company} industry...")
@@ -4553,7 +4631,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         print(f"   ⚠️ No industry results found")
     
     # STEP 4: FUZZY PRE-VERIFICATION
-    print(f"   🔍 FUZZY: Attempting pre-verification before LLM...")
+    # STEP 4: FULL FUZZY PRE-VERIFICATION (now with all results)
+    print(f"   🔍 FUZZY: Full pre-verification before LLM...")
     
     fuzzy_result = fuzzy_pre_verification_stage5(
         claimed_role=claimed_role,
@@ -4566,18 +4645,8 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         company=company
     )
     
-    # EARLY EXIT: Role definitively failed
-    if fuzzy_result.get("role_definitive_fail"):
-        print(f"   ❌ EARLY EXIT: Role check failed - skipping region and industry checks")
-        return False, {
-            "stage": "Stage 5: Role/Region/Industry",
-            "check_name": "check_stage5_unified",
-            "message": f"Role FAILED: Found '{fuzzy_result.get('role_extracted')}' but miner claimed '{claimed_role}'",
-            "failed_fields": ["role"],
-            "early_exit": "role_failed",
-            "extracted_role": fuzzy_result.get("role_extracted"),
-            "claimed_role": claimed_role
-        }
+    # Note: role_definitive_fail already checked above (before region/industry DDG)
+    # so we only check region anti-gaming here
     
     # EARLY EXIT: Region anti-gaming AND role already verified
     if fuzzy_result.get("region_hard_fail") and fuzzy_result.get("role_verified"):
@@ -4757,7 +4826,7 @@ RESPOND WITH JSON ONLY:
                     "max_tokens": 500,
                     "temperature": 0  # Low temperature for consistency
                 },
-                timeout=15
+                timeout=20
             ) as response:
                 if response.status != 200:
                     return False, {
@@ -5118,21 +5187,21 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     print("   ✅ Stage 2 passed")
 
     # ========================================================================
-    # Stage 3: MyEmailVerifier Check (HARD)
+    # Stage 3: TrueList Email Verification (HARD)
     # - Email verification: Pass IF valid, IF catch-all accept only IF SPF
     # ========================================================================
-    print(f"🔍 Stage 3: MyEmailVerifier email validation for {email} @ {company}")
-    passed, rejection_reason = await check_myemailverifier_email(lead)
+    print(f"🔍 Stage 3: TrueList email validation for {email} @ {company}")
+    passed, rejection_reason = await check_truelist_email(lead)
     
     # Collect Stage 3 email data
-    # Map MyEmailVerifier status to standard format: "valid", "catch-all", "invalid", "unknown"
-    raw_status = lead.get("email_verifier_status", "Unknown")
-    if raw_status == "Valid":
+    # Map TrueList status to standard format: "valid", "catch-all", "invalid", "unknown"
+    # TrueList statuses: email_ok, accept_all, disposable, unknown, invalid, failed_smtp, failed_syntax
+    raw_status = lead.get("email_verifier_status", "unknown")
+    if raw_status == "email_ok":
         email_status = "valid"
-    elif raw_status in ["Catch All", "Catch-All", "Catch-all"]:
+    elif raw_status == "accept_all":
         email_status = "catch-all"
-    elif raw_status in ["Invalid", "Grey-listed", "Unknown"]:
-        # Grey-listed and Unknown are treated as invalid (tasks2.md Phase 1 requirement)
+    elif raw_status in ["invalid", "disposable", "failed_smtp", "failed_syntax"]:
         email_status = "invalid"
     else:
         email_status = "unknown"
