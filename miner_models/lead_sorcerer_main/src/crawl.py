@@ -63,7 +63,7 @@ FIRECRAWL_EXTRACT_SCHEMA = {
                 "name": {"type": "string", "description": "Company name"},
                 "description": {
                     "type": "string",
-                    "description": "Brief business description",
+                    "description": "Concise 1-2 sentence description of what the company does and their core value proposition (e.g., 'Aerospace manufacturer and space transportation company focused on reducing space transportation costs')",
                 },
                 "industry": {"type": "string", "description": "Industry or sector"},
                 "sub_industry": {"type": "string", "description": "Specific sub-industry or niche within the broader industry"},

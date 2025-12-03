@@ -1118,6 +1118,113 @@ def get_rejection_feedback(
         return []
 
 
+# ---- Database Utilities -----------------------------------------------
+def get_all_tables() -> List[str]:
+    """
+    Get all table names from Supabase public schema.
+
+    Works with just the anon key (no JWT required).
+
+    If the 'get_all_tables' SQL function exists in Supabase, it will use that.
+    Otherwise, it probes a list of known tables to check which ones exist.
+
+    To create the SQL function (optional, for complete table list):
+
+        CREATE OR REPLACE FUNCTION get_all_tables()
+        RETURNS TABLE (table_name text)
+        LANGUAGE sql
+        SECURITY DEFINER
+        AS $$
+          SELECT tablename::text
+          FROM pg_tables
+          WHERE schemaname = 'public'
+          ORDER BY tablename;
+        $$;
+
+    Returns:
+        List[str]: List of table names in the public schema.
+                   Returns empty list if error occurs.
+
+    Example:
+        >>> tables = get_all_tables()
+        >>> for table in tables:
+        ...     print(table)
+        audit_log
+        leads
+        prospect_queue
+        validation_tracking
+    """
+    try:
+        headers = {
+            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            "apikey": SUPABASE_ANON_KEY,
+            "Content-Type": "application/json"
+        }
+
+        # First, try the RPC function if it exists
+        url = f"{SUPABASE_URL}/rest/v1/rpc/get_all_tables"
+        response = requests.post(url, json={}, headers=headers, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            if data:
+                tables = [row.get('table_name') for row in data if row.get('table_name')]
+                bt.logging.info(f"✅ Found {len(tables)} tables via RPC function")
+                return tables
+
+        # Fallback: probe known tables to see which exist
+        bt.logging.debug("RPC function not available, probing known tables...")
+
+        known_tables = [
+            # Core tables
+            'prospect_queue',
+            'leads',
+            'validation_tracking',
+            'rejection_feedback',
+            # Audit/logging
+            'audit_log',
+            'submission_audit',
+            'transparency_log',
+            # Stats
+            'miner_stats',
+            'validator_stats',
+            'miner_daily_stats',
+            # Rate limiting
+            'rate_limits',
+            'cooldowns',
+            # API
+            'api_requests',
+            'api_keys',
+            # Other
+            'users',
+            'feedback',
+            'consensus_results',
+        ]
+
+        existing_tables = []
+        for table in known_tables:
+            try:
+                url = f"{SUPABASE_URL}/rest/v1/{table}?select=*&limit=0"
+                resp = requests.get(url, headers=headers, timeout=5)
+                # 200 = exists and accessible, 401 = exists but needs auth
+                if resp.status_code in [200, 401]:
+                    existing_tables.append(table)
+                # 404 = does not exist, skip
+            except Exception:
+                pass
+
+        if existing_tables:
+            bt.logging.info(f"✅ Found {len(existing_tables)} tables via probing")
+        else:
+            bt.logging.warning("No tables found (all returned 404)")
+
+        return existing_tables
+
+    except Exception as e:
+        bt.logging.error(f"❌ Failed to get table names: {e}")
+        return []
+
+
 # ---- Curations -------------------------------------------------------
 def push_curation_request(payload: dict) -> str:
     try:
@@ -1723,7 +1830,8 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
     payload_json = json.dumps(payload, sort_keys=True, separators=(',', ':'))
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     build_id = os.getenv("BUILD_ID", "miner-client")
-    
+    print(f"📤 Sending payload_hash: {payload_hash[:16]}...")
+
     # Retry loop: Up to 3 attempts
     for attempt in range(1, 4):
         try:
@@ -1793,7 +1901,7 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
             else:
                 # All attempts exhausted
                 bt.logging.error(f"❌ All 3 attempts failed. Last error: {error_msg}")
-                return None
+                return error_msg
             
         except Exception as e:
             # Non-HTTP errors (network timeout, connection error, etc.)
@@ -1804,7 +1912,7 @@ def gateway_get_presigned_url(wallet: bt.wallet, lead_data: Dict) -> Dict:
             else:
                 # All attempts exhausted
                 bt.logging.error(f"❌ All 3 attempts failed. Last error: {e}")
-                return None
+                return error_msg
 
 
 def gateway_upload_lead(presigned_url: str, lead_data: Dict) -> bool:

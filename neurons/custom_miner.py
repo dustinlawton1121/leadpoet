@@ -41,6 +41,8 @@ class _SilenceInvalidRequest(logging.Filter):
             return False
         return True
 
+TERMS_VERSION_HASH = "026d57af3e1d43ef5b7ac74cb4e2419037e6906fe3a2268911c89be806aa8131"
+
 
 root_logger = logging.getLogger()
 bittensor_logger = logging.getLogger("bittensor")
@@ -1012,11 +1014,17 @@ def ensure_data_files():
 def sanitize_prospect(prospect, miner_hotkey=None):
     """
     Sanitize and validate prospect fields + add regulatory attestations.
-    
-    Task 1.2: Appends attestation metadata from data/regulatory/miner_attestation.json
+
+    Task 1.2: Appends attestation metadata from hotkey-specific attestation files
     to ensure every lead submission includes regulatory compliance information.
     """
+    # attestation_file = Path("data/regulatory/miner_attestation.json")
 
+    # with open(attestation_file, 'r') as f:
+    #     attestation = json.load(f)
+    #     print(f"{attestation}")
+    #     print(f"{miner_hotkey}")
+    # return attestation
     def strip_html(s):
         return re.sub('<.*?>', '', html.unescape(str(s))) if isinstance(
             s, str) else s
@@ -1081,8 +1089,11 @@ def sanitize_prospect(prospect, miner_hotkey=None):
         try:
             with open(attestation_file, 'r') as f:
                 attestation = json.load(f)
-            terms_hash = attestation.get("terms_version_hash") 
+                print(f"{attestation}")
+                print(f"{miner_hotkey}")
+            terms_hash = TERMS_VERSION_HASH
             wallet_ss58 = miner_hotkey
+            # wallet_ss58 = attestation.get("wallet_ss58")
         except Exception as e:
             bt.logging.warning(f"Failed to load attestation file: {e}")
             terms_hash = "NOT_ATTESTED"
