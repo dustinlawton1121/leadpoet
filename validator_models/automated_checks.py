@@ -10,12 +10,40 @@ import whois
 import json
 import numpy as np
 import unicodedata
+import sys
 # from pygod.detector import DOMINANT  # DEPRECATED: Only used in unused collusion_check function
 from datetime import datetime
 from urllib.parse import urlparse
 from typing import Dict, Any, Tuple, List, Optional
 from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
+
+# Custom print function that logs to file
+_LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "validation_artifacts", "automated_checks_1.log")
+os.makedirs(os.path.dirname(_LOG_FILE_PATH), exist_ok=True)
+
+# Store reference to builtin print before overriding
+_builtin_print = print
+
+def _log_print(*args, **kwargs):
+    """Print to both stdout and log file."""
+    # Print to stdout using builtin
+    _builtin_print(*args, **kwargs)
+    # Write to log file
+    try:
+        with open(_LOG_FILE_PATH, "a", encoding="utf-8") as f:
+            # Convert args to string like print does
+            sep = kwargs.get('sep', ' ')
+            end = kwargs.get('end', '\n')
+            message = sep.join(str(arg) for arg in args) + end
+            # Add timestamp
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"[{timestamp}] {message}")
+    except Exception:
+        pass  # Silently ignore logging errors
+
+# Replace builtin print with logging version for this module
+print = _log_print
 from Leadpoet.utils.utils_lead_extraction import (
     get_email,
     get_website,
@@ -50,9 +78,28 @@ load_dotenv()
 MYEMAILVERIFIER_API_KEY = ''
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
+GSE_API_KEYS=[
+    # 'AIzaSyAP2P_qBM3JkF1Q6rVWneKnwa7bdzCZ2rc',
+    # 'AIzaSyAEu--w7V4XrSQEtdbDxmo6DyFRDOWPKRo',
+    'AIzaSyA-Gy8fdTjJXvlFPUfgUVUTcYnWw3ror9k',         # Only if USE_DDG_SEARCH=false
+    'AIzaSyC45Mg8ohm2I2Ngl7vkFFodDy14W3zdPLU',
+    'AIzaSyCig5L4ZB9LAUn7NEDOPa_2xfEtiDbuVv8',
+    'AIzaSyClxdrl6d3navHKropwgcDCrXWzgXBd8s8',
+    'AIzaSyALLEAX1ra9pHRdJ62R18pvqiSUV-7-KKE',
+]
+
+# GSE API key cycling (rotates through 5 keys using modulo)
+_gse_id = 0
+
+def get_next_gse_key() -> str:
+    """Get the next GSE API key, cycling through all available keys."""
+    global _gse_id
+    key = GSE_API_KEYS[_gse_id]
+    _gse_id = (_gse_id + 1) % len(GSE_API_KEYS)
+    return key
+
 # NEW: Stage 4 API keys (Google Search Engine + OpenAI LLM)
 GSE_CX = os.getenv("GSE_CX", "")
-GSE_API_KEY = os.getenv("GSE_API_KEY", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 # DuckDuckGo Search (FREE, no API key needed)
@@ -1878,7 +1925,7 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
                 print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
                 
                 params = {
-                    "key": GSE_API_KEY,
+                    "key": get_next_gse_key(),
                     "cx": GSE_CX,
                     "q": query,
                     "num": max_results
