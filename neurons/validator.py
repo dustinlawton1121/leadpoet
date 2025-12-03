@@ -1633,7 +1633,12 @@ class Validator(BaseValidatorNeuron):
             
             print(f"📡 Fetching leads from gateway for epoch {current_epoch}...")
             
-            leads = gateway_get_epoch_leads(self.wallet, current_epoch)
+            # Unpack tuple: (leads, max_leads_per_epoch)
+            leads, max_leads_per_epoch = gateway_get_epoch_leads(self.wallet, current_epoch)
+            
+            # Store max_leads_per_epoch for use in submit_weights_at_epoch_end
+            # This value comes dynamically from the gateway config
+            self._max_leads_per_epoch = max_leads_per_epoch
             
             # Handle different response types:
             # - None = Already submitted (gateway returned explicit message)
@@ -1651,7 +1656,7 @@ class Validator(BaseValidatorNeuron):
                 await asyncio.sleep(10)
                 return
             
-            print(f"[DEBUG] Received {len(leads)} leads from gateway")
+            print(f"[DEBUG] Received {len(leads)} leads from gateway (max_leads_per_epoch={max_leads_per_epoch})")
             
             if not leads:
                 # Empty list = timeout or error (NOT already submitted)
@@ -1749,12 +1754,11 @@ class Validator(BaseValidatorNeuron):
                             print(f"      Failed Fields: {', '.join(failed_fields)}")
                     print("")
                     
-                    # Add 20-second delay between leads (except for the last one)
-                    # CRITICAL: Prevents Spamhaus DNSBL rate limiting (free tier: 10 queries/min)
-                    # With 20s delay: ~2.5 queries/min (very safe margin)
+                    # Add 12-second delay between leads (except for the last one)
+                    # Prevents Spamhaus DNSBL rate limiting
                     if idx < len(leads):
-                        print(f"⏳ Waiting 20 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(20)
+                        print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(12)
                     
                 except Exception as e:
                     from validator_models.automated_checks import EmailVerificationUnavailableError
@@ -1775,12 +1779,11 @@ class Validator(BaseValidatorNeuron):
                         print(f"[DEBUG] Lead structure: {lead}")
                         print("")
                     
-                    # Add 20-second delay between leads (except for the last one)
-                    # CRITICAL: Prevents Spamhaus DNSBL rate limiting (free tier: 10 queries/min)
-                    # With 20s delay: ~2.5 queries/min (very safe margin)
+                    # Add 12-second delay between leads (except for the last one)
+                    # Prevents Spamhaus DNSBL rate limiting
                     if idx < len(leads):
-                        print(f"⏳ Waiting 20 seconds before processing next lead... ({idx}/{len(leads)} complete)")
-                        await asyncio.sleep(20)
+                        print(f"⏳ Waiting 12 seconds before processing next lead... ({idx}/{len(leads)} complete)")
+                        await asyncio.sleep(12)
                     continue
             
             # Submit hashed validation results to gateway
@@ -2004,7 +2007,8 @@ class Validator(BaseValidatorNeuron):
             BASE_BURN_SHARE = 0.75         # 75% base burn to UID 0
             MAX_CURRENT_EPOCH_SHARE = 0.10 # 10% max to miners (current epoch)
             MAX_ROLLING_EPOCH_SHARE = 0.15 # 15% max to miners (rolling 30 epochs)
-            MAX_LEADS_PER_EPOCH = 50
+            # Dynamic MAX_LEADS_PER_EPOCH from gateway (fetched during process_gateway_validation_workflow)
+            MAX_LEADS_PER_EPOCH = getattr(self, '_max_leads_per_epoch', 50)  # Default to 50 for backwards compat
             ROLLING_WINDOW = 30
             
             # ═══════════════════════════════════════════════════════════════════
@@ -2070,6 +2074,7 @@ class Validator(BaseValidatorNeuron):
                 print(f"⚖️  SUBMITTING WEIGHTS FOR EPOCH {current_epoch}")
                 print(f"{'='*80}")
                 print(f"   Block: {current_block} (block {blocks_into_epoch}/360 into epoch)")
+                print(f"   MAX_LEADS_PER_EPOCH: {MAX_LEADS_PER_EPOCH} (from gateway config)")
                 print(f"   Current epoch miners: {len(miner_scores)}")
                 print(f"   Current epoch points: {sum(miner_scores.values())}")
                 print()

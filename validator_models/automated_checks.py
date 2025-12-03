@@ -41,7 +41,6 @@ def normalize_accents(text: str) -> str:
     normalized = unicodedata.normalize('NFD', text)
     return ''.join(char for char in normalized if unicodedata.category(char) != 'Mn')
 
-
 # Custom exception for API infrastructure failures (should skip lead, not submit)
 class EmailVerificationUnavailableError(Exception):
     """Raised when email verification API is unavailable (no credits, bad key, network error, etc.)"""
