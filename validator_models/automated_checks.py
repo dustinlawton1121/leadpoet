@@ -79,24 +79,28 @@ MYEMAILVERIFIER_API_KEY = ''
 TRUELIST_API_KEY = os.getenv("TRUELIST_API_KEY", "")
 
 GSE_API_KEYS=[
-    # 'AIzaSyAP2P_qBM3JkF1Q6rVWneKnwa7bdzCZ2rc',
-    # 'AIzaSyAEu--w7V4XrSQEtdbDxmo6DyFRDOWPKRo',
-    'AIzaSyA-Gy8fdTjJXvlFPUfgUVUTcYnWw3ror9k',         # Only if USE_DDG_SEARCH=false
+    'AIzaSyAP2P_qBM3JkF1Q6rVWneKnwa7bdzCZ2rc',
+    'AIzaSyAEu--w7V4XrSQEtdbDxmo6DyFRDOWPKRo',
+    # 'AIzaSyA-Gy8fdTjJXvlFPUfgUVUTcYnWw3ror9k',         # Only if USE_DDG_SEARCH=false
     'AIzaSyC45Mg8ohm2I2Ngl7vkFFodDy14W3zdPLU',
     'AIzaSyCig5L4ZB9LAUn7NEDOPa_2xfEtiDbuVv8',
     'AIzaSyClxdrl6d3navHKropwgcDCrXWzgXBd8s8',
     'AIzaSyALLEAX1ra9pHRdJ62R18pvqiSUV-7-KKE',
 ]
 
-# GSE API key cycling (rotates through 5 keys using modulo)
+# GSE API key cycling - DEPRECATED: now passed as parameter through function chain
+# Keeping these for backward compatibility but prefer passing gse_id as parameter
 _gse_id = 0
 
-def get_next_gse_key() -> str:
-    """Get the next GSE API key, cycling through all available keys."""
+def set_gse_id(gse_id: int):
+    """DEPRECATED: Set the GSE API key index. Prefer passing gse_id as parameter."""
     global _gse_id
-    key = GSE_API_KEYS[_gse_id]
-    _gse_id = (_gse_id + 1) % len(GSE_API_KEYS)
-    return key
+    _gse_id = gse_id % len(GSE_API_KEYS)
+
+def get_gse_id() -> int:
+    """DEPRECATED: Get the current GSE API key index. Prefer passing gse_id as parameter."""
+    global _gse_id
+    return _gse_id
 
 # NEW: Stage 4 API keys (Google Search Engine + OpenAI LLM)
 GSE_CX = os.getenv("GSE_CX", "")
@@ -1864,14 +1868,17 @@ async def search_linkedin_ddg(full_name: str, company: str, linkedin_url: str = 
     print(f"   ❌ DDG: No matching profile found after trying {len(query_variations)} variations")
     return [], False
 
-async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5) -> List[dict]:
+async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = None, max_results: int = 5, gse_id: int = 0) -> List[dict]:
     """
     Search LinkedIn using Google Custom Search Engine for person's profile.
-    
+
     OPTIMIZED: Uses 3 search variations (reduced from 5 for 60% fewer API calls):
     1. Exact URL in quotes (most specific)
     2. Profile slug only (handles www/protocol differences)
     3. Name + site:linkedin.com (broadest fallback)
+
+    Args:
+        gse_id: GSE API key index for key rotation (0-5)
     
     This provides same coverage as 5 variations but uses fewer API calls:
     - Free tier: 100 queries/day ÷ 3 = ~33 leads/day (vs 20 with 5 variations)
@@ -1889,7 +1896,7 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
     if not linkedin_url:
         print(f"   ⚠️ No LinkedIn URL provided")
         return []
-    
+
     # Extract profile slug from LinkedIn URL
     # Example: https://www.linkedin.com/in/tanja-reese-cpa-31477926 → tanja-reese-cpa-31477926
     profile_slug = linkedin_url.split("/in/")[-1].strip("/") if "/in/" in linkedin_url else None
@@ -1924,12 +1931,16 @@ async def search_linkedin_gse(full_name: str, company: str, linkedin_url: str = 
             for variation_idx, query in enumerate(query_variations, 1):
                 print(f"      🔄 Variation {variation_idx}/{len(query_variations)}: {query[:80]}...")
                 
+                # Use passed gse_id with modulo to prevent out-of-bounds
+                key_index = gse_id % len(GSE_API_KEYS)
                 params = {
-                    "key": get_next_gse_key(),
+                    "key": GSE_API_KEYS[key_index],
                     "cx": GSE_CX,
                     "q": query,
                     "num": max_results
                 }
+
+                print(f"         📡 GSE API KEY #{key_index}: {GSE_API_KEYS[key_index][:25]}...")
                 
                 async with session.get(url, params=params, timeout=10) as response:
                     if response.status != 200:
@@ -2297,18 +2308,19 @@ Respond ONLY with JSON: {{"name_match": true/false, "company_match": true/false,
     except Exception as e:
         return False, f"LLM verification error: {str(e)}"
 
-async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
+async def check_linkedin_gse(lead: dict, gse_id: int = 0) -> Tuple[bool, dict]:
     """
     Stage 4: LinkedIn/GSE validation (HARD check).
-    
+
     Verifies that the person works at the company using:
     1. Google Custom Search (LinkedIn)
     2. OpenAI LLM verification
-    
+
     This is a HARD check - instant rejection if fails.
 
     Args:
         lead: Lead data with full_name, company, linkedin
+        gse_id: GSE API key index for key rotation (0-5)
 
     Returns:
         (passed, rejection_reason)
@@ -2354,11 +2366,11 @@ async def check_linkedin_gse(lead: dict) -> Tuple[bool, dict]:
                 # NO GSE fallback if DDG returns empty (URL mismatch or no results)
                 # This prevents gaming: if DDG can't find the profile, it's likely invalid
             except Exception as e:
-                print(f"   ⚠️ DuckDuckGo API/request failed: {e}, falling back to GSE")
-                search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+                print(f"   ⚠️ DuckDuckGo API/request failed: {e}, falling back to GSE (key #{gse_id})")
+                search_results = await search_linkedin_gse(full_name, company, linkedin_url, gse_id=gse_id)
                 url_match_exact = False  # GSE doesn't return URL match status
         else:
-            search_results = await search_linkedin_gse(full_name, company, linkedin_url)
+            search_results = await search_linkedin_gse(full_name, company, linkedin_url, gse_id=gse_id)
             url_match_exact = False  # GSE doesn't return URL match status
         
         # Store search count in lead for data collection
@@ -5128,9 +5140,13 @@ async def fix_stage5_with_extracted_values(
 
 # Main validation pipeline
 
-async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
+async def run_automated_checks(lead: dict, gse_id: int = 0) -> Tuple[bool, dict]:
     """
     Run all automated checks in stages, returning (passed, structured_data).
+
+    Args:
+        lead: Lead data dictionary
+        gse_id: GSE API key index for key rotation (0-5)
 
     Returns:
         Tuple[bool, dict]: (passed, structured_automated_checks_data)
@@ -5397,8 +5413,8 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     # Stage 4: LinkedIn/GSE Validation (HARD)
     # ========================================================================
     print(f"🔍 Stage 4: LinkedIn/GSE validation for {email} @ {company}")
-    
-    passed, rejection_reason = await check_linkedin_gse(lead)
+
+    passed, rejection_reason = await check_linkedin_gse(lead, gse_id=gse_id)
     
     # Collect Stage 4 data even on failure
     automated_checks_data["stage_4_linkedin"]["gse_search_count"] = lead.get("gse_search_count", 0)
@@ -5634,8 +5650,13 @@ async def check_duplicates(leads: list) -> Tuple[bool, dict]:
 
     return len(duplicate_leads) > 0, duplicate_leads
 
-async def validate_lead_list(leads: list) -> list:
-    """Main validation function - maintains backward compatibility"""
+async def validate_lead_list(leads: list, gse_id: int = 0) -> list:
+    """Main validation function - maintains backward compatibility
+
+    Args:
+        leads: List of lead dictionaries
+        gse_id: GSE API key index for key rotation (0-5)
+    """
 
     # Check for duplicates
     has_duplicates, duplicate_leads = await check_duplicates(leads)
@@ -5662,7 +5683,7 @@ async def validate_lead_list(leads: list) -> list:
                 })
             else:
                 # Process non-duplicate leads through automated checks
-                passed, automated_checks_data = await run_automated_checks(lead)
+                passed, automated_checks_data = await run_automated_checks(lead, gse_id=gse_id)
                 status = "Valid" if passed else "Invalid"
                 # Extract rejection_reason for backwards compatibility
                 reason = automated_checks_data.get("rejection_reason", {}) if not passed else {}
@@ -5685,7 +5706,7 @@ async def validate_lead_list(leads: list) -> list:
         domain = urlparse(website).netloc if website else ""
 
         # Run new automated checks
-        passed, automated_checks_data = await run_automated_checks(lead)
+        passed, automated_checks_data = await run_automated_checks(lead, gse_id=gse_id)
 
         status = "Valid" if passed else "Invalid"
         # Extract rejection_reason for backwards compatibility
