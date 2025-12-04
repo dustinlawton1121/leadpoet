@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from disposable_email_domains import blocklist as DISPOSABLE_DOMAINS
 
 # Custom print function that logs to file
-_LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "validation_artifacts", "automated_checks_1.log")
+_LOG_FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "validation_artifacts", "automated_checks_stage5_2.log")
 os.makedirs(os.path.dirname(_LOG_FILE_PATH), exist_ok=True)
 
 # Store reference to builtin print before overriding
@@ -4606,9 +4606,7 @@ async def check_stage5_unified(lead: dict) -> Tuple[bool, dict]:
         print(f"   ✅ Found {len(role_results)} role search results")
     else:
         print(f"   ⚠️ No role results found")
-    
-    print(f"   ⏳ Waiting 5s before region search...")
-    await asyncio.sleep(5)
+
     # EARLY EXIT CHECK: Do quick role + region anti-gaming check BEFORE region/industry DDG searches
     # This saves 6+ seconds and 2 DDG API calls when role is definitively wrong OR region is gaming
     print(f"   🔍 QUICK CHECK: Verifying role and region anti-gaming before continuing...")
@@ -5000,6 +4998,134 @@ RESPOND WITH JSON ONLY:
         }
 
 
+# ============================================================================
+# STAGE 5 FIX: OpenAI-based correction for failed Stage 5 fields
+# ============================================================================
+# When Stage 5 fails, this function attempts to find the correct values
+# for role, region, and industry using OpenAI with web search capability.
+# If successful, it updates the lead and allows re-verification.
+# ============================================================================
+
+async def fix_stage5_with_extracted_values(
+    lead: dict,
+    rejection_reason: dict
+) -> Tuple[bool, dict, Optional[dict]]:
+    """
+    Attempt to fix Stage 5 failures using extracted values from rejection reason.
+
+    When Stage 5 fails (role/region/industry mismatch), this function:
+    1. Checks if extracted values exist (not "Not found" or empty)
+    2. If extracted value exists, replaces the claimed value with it
+    3. If extracted value is "Not found", skips that field (continue without fix)
+
+    Logic:
+    - "Role FAILED: LLM found 'Not found'" → Skip fix, continue
+    - "Role FAILED: LLM found 'Owner' but miner claimed 'Business Owner'" → Replace with 'Owner'
+
+    Args:
+        lead: The lead dict that failed Stage 5
+        rejection_reason: The rejection reason dict from check_stage5_unified
+
+    Returns:
+        Tuple of (fix_applied: bool, updated_lead: dict, fix_details: dict or None)
+    """
+    failed_fields = rejection_reason.get("failed_fields", [])
+    if not failed_fields or "exception" in failed_fields:
+        print("   ⚠️ STAGE 5 FIX: No fixable fields identified, skipping fix attempt")
+        return False, lead, None
+
+    # Extract lead info for logging
+    full_name = get_field(lead, "full_name") or f"{get_first_name(lead)} {get_last_name(lead)}"
+    company = get_company(lead) or ""
+    claimed_role = get_role(lead) or ""
+    claimed_region = get_location(lead) or ""
+    claimed_industry = get_industry(lead) or ""
+
+    # Extract values from rejection reason (these are what Stage 5 actually found)
+    rejection_message = rejection_reason.get("message", "")
+    extracted_role = rejection_reason.get("extracted_role", "")
+    extracted_region = rejection_reason.get("extracted_region", "")
+    extracted_industry = rejection_reason.get("extracted_industry", "")
+
+    print(f"   🔧 STAGE 5 FIX: Attempting to fix failed fields: {failed_fields}")
+    print(f"      Person: {full_name} at {company}")
+    print(f"      Claimed - Role: {claimed_role}, Region: {claimed_region}, Industry: {claimed_industry}")
+    print(f"      Rejection: {rejection_message}")
+
+    # Initialize fix tracking
+    fix_applied = False
+    fix_details = {
+        "original_values": {},
+        "fixed_values": {},
+        "skipped_fields": [],
+        "method": "extracted_value_replacement"
+    }
+
+    # Helper function to check if extracted value is valid (not "Not found" or empty)
+    def is_valid_extracted(value: str) -> bool:
+        if not value:
+            return False
+        value_lower = value.lower().strip()
+        return value_lower not in ["not found", "not_found", "n/a", "unknown", ""]
+
+    # Fix role if we have a valid extracted value
+    if "role" in failed_fields:
+        print(f"      Extracted Role: {extracted_role}")
+        fix_details["original_values"]["role"] = claimed_role
+
+        if is_valid_extracted(extracted_role):
+            # We have a valid extracted role (e.g., "Owner" vs claimed "Business Owner")
+            # Replace the claimed role with the extracted one
+            lead["role"] = extracted_role
+            lead["Role"] = extracted_role
+            fix_details["fixed_values"]["role"] = extracted_role
+            fix_applied = True
+            print(f"      ✅ Fixed role: '{claimed_role}' → '{extracted_role}'")
+        else:
+            # Extracted role is "Not found" - skip fix, continue
+            fix_details["skipped_fields"].append("role")
+            print(f"      ⏭️ Skipping role fix (extracted value is 'Not found')")
+
+    # Fix region if we have a valid extracted value
+    if "region" in failed_fields:
+        print(f"      Extracted Region: {extracted_region}")
+        fix_details["original_values"]["region"] = claimed_region
+
+        if is_valid_extracted(extracted_region):
+            lead["region"] = extracted_region
+            lead["Region"] = extracted_region
+            lead["location"] = extracted_region
+            lead["Location"] = extracted_region
+            fix_details["fixed_values"]["region"] = extracted_region
+            fix_applied = True
+            print(f"      ✅ Fixed region: '{claimed_region}' → '{extracted_region}'")
+        else:
+            fix_details["skipped_fields"].append("region")
+            print(f"      ⏭️ Skipping region fix (extracted value is empty or 'Not found')")
+
+    # Fix industry if we have a valid extracted value
+    if "industry" in failed_fields:
+        print(f"      Extracted Industry: {extracted_industry}")
+        fix_details["original_values"]["industry"] = claimed_industry
+
+        if is_valid_extracted(extracted_industry):
+            lead["industry"] = extracted_industry
+            lead["Industry"] = extracted_industry
+            fix_details["fixed_values"]["industry"] = extracted_industry
+            fix_applied = True
+            print(f"      ✅ Fixed industry: '{claimed_industry}' → '{extracted_industry}'")
+        else:
+            fix_details["skipped_fields"].append("industry")
+            print(f"      ⏭️ Skipping industry fix (extracted value is empty or 'Not found')")
+
+    if fix_applied:
+        print(f"   ✅ STAGE 5 FIX: Applied fixes using extracted values")
+    else:
+        print(f"   ⏭️ STAGE 5 FIX: No fixes applied (all extracted values are 'Not found')")
+
+    return fix_applied, lead, fix_details
+
+
 # Main validation pipeline
 
 async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
@@ -5314,10 +5440,60 @@ async def run_automated_checks(lead: dict) -> Tuple[bool, dict]:
     if not passed:
         msg = rejection_reason.get("message", "Unknown error") if rejection_reason else "Unknown error"
         print(f"   ❌ Stage 5 failed: {msg}")
-        automated_checks_data["passed"] = False
-        automated_checks_data["rejection_reason"] = rejection_reason
-        automated_checks_data["stage_5_verification"]["early_exit"] = rejection_reason.get("early_exit") if rejection_reason else None
-        return False, automated_checks_data
+
+        # ========================================================================
+        # Stage 5 FIX: Attempt to fix failed fields using extracted values
+        # - If extracted value exists (e.g., "Owner") → replace claimed value
+        # - If extracted value is "Not found" → skip fix, continue
+        # ========================================================================
+        print(f"   🔧 Stage 5 FIX: Attempting to fix failed fields using extracted values...")
+
+        fix_applied, lead, fix_details = await fix_stage5_with_extracted_values(lead, rejection_reason)
+
+        if fix_applied:
+            print(f"   🔄 Stage 5 FIX: Fix applied, re-running Stage 5 verification...")
+
+            # Clear previous Stage 5 results before re-running
+            lead.pop("stage5_role_match", None)
+            lead.pop("stage5_region_match", None)
+            lead.pop("stage5_industry_match", None)
+            lead.pop("stage5_extracted_role", None)
+            lead.pop("stage5_extracted_region", None)
+            lead.pop("stage5_extracted_industry", None)
+
+            # Re-run Stage 5 with fixed values
+            passed_retry, rejection_reason_retry = await check_stage5_unified(lead)
+
+            # Update Stage 5 data after retry
+            automated_checks_data["stage_5_verification"]["role_verified"] = lead.get("stage5_role_match", False)
+            automated_checks_data["stage_5_verification"]["region_verified"] = lead.get("stage5_region_match", False)
+            automated_checks_data["stage_5_verification"]["industry_verified"] = lead.get("stage5_industry_match", False)
+            automated_checks_data["stage_5_verification"]["extracted_role"] = lead.get("stage5_extracted_role")
+            automated_checks_data["stage_5_verification"]["extracted_region"] = lead.get("stage5_extracted_region")
+            automated_checks_data["stage_5_verification"]["extracted_industry"] = lead.get("stage5_extracted_industry")
+            automated_checks_data["stage_5_verification"]["fix_applied"] = True
+            automated_checks_data["stage_5_verification"]["fix_details"] = fix_details
+
+            if passed_retry:
+                print(f"   ✅ Stage 5 FIX: Re-verification PASSED after fix!")
+                passed = True
+                rejection_reason = None
+            else:
+                msg_retry = rejection_reason_retry.get("message", "Unknown error") if rejection_reason_retry else "Unknown error"
+                print(f"   ❌ Stage 5 FIX: Re-verification still FAILED: {msg_retry}")
+                rejection_reason = rejection_reason_retry
+                automated_checks_data["stage_5_verification"]["fix_retry_failed"] = True
+        else:
+            print(f"   ⚠️ Stage 5 FIX: No fix could be applied")
+            automated_checks_data["stage_5_verification"]["fix_applied"] = False
+            automated_checks_data["stage_5_verification"]["fix_details"] = fix_details
+
+        # If still not passed after fix attempt, return failure
+        if not passed:
+            automated_checks_data["passed"] = False
+            automated_checks_data["rejection_reason"] = rejection_reason
+            automated_checks_data["stage_5_verification"]["early_exit"] = rejection_reason.get("early_exit") if rejection_reason else None
+            return False, automated_checks_data
 
     print("   ✅ Stage 5 passed")
 
